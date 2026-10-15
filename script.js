@@ -9,8 +9,28 @@ const iosArrow = document.getElementById('ios-arrow-help');
 
 const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+const isMobile = false; // /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
+// Adresse du serveur : une seule pour toute l'application
+const EN_TEST_LOCAL = false;   // true : serveur sur ce PC / false : serveur en ligne
+const SERVER = EN_TEST_LOCAL ? 'http://localhost:3001' : 'https://dev-api.adlil.net';
+//const SERVER = EN_TEST_LOCAL ? 'http://localhost:3001' : process.env.SERVER_URL || 'http://localhost:3001';
+//const SERVER = process.env.SERVER_URL || 'http://localhost:3001';
+
+/*// Le Front regarde l'adresse actuelle affichée dans la barre de Chrome
+const SERVER = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:3001'           // Si vous testez sur votre PC
+    : 'https://adlil.net';      // Si le site est ouvert en ligne (branche test/main)
+    //yb ou bien est-ce 
+    // : 'https://dev-api.adlil.net';
+*/
+
+
+const NUMERO_WA = "213551105867";   // ← numéro WhatsApp du serveur, sans le « + »
+
+const PALETTE = ['#e53935', '#1e88e5', '#43a047', '#fb8c00', '#8e24aa', '#00acc1'];
+
+//yb
 // ============================================================
 // INDEXEDDB INIT
 // ============================================================
@@ -24,12 +44,12 @@ let idb;
 // ============================================================
 function getClientId() {
     let clientId = localStorage.getItem('adlil_client_id');
-
     if (!clientId) {
-        clientId = crypto.randomUUID();
+        clientId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+            ? crypto.randomUUID()
+            : 'id-' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
         localStorage.setItem('adlil_client_id', clientId);
     }
-
     return clientId;
 }
 
@@ -52,41 +72,6 @@ function openIDB() {
     });
 }
 
-// ============================================================
-// FIRESTORE SYNC
-// ============================================================
-async function syncPublications() {
-    try {
-        const snapshot = await db.collection('publications').orderBy('date', 'asc').get();
-
-        // Vider IndexedDB complètement avant de réécrire (supprime les docs effacés)
-        await new Promise((resolve, reject) => {
-            const tx = idb.transaction(STORE_NAME, 'readwrite');
-            const req = tx.objectStore(STORE_NAME).clear();
-            req.onsuccess = () => resolve();
-            req.onerror = () => reject(req.error);
-        });
-
-        if (snapshot.empty) { console.log('ℹ️ Aucune publication'); return; }
-
-        await new Promise((resolve, reject) => {
-            const tx = idb.transaction(STORE_NAME, 'readwrite');
-            const store = tx.objectStore(STORE_NAME);
-            snapshot.forEach(doc => {
-                store.put({ id: doc.id, ...doc.data(), date: doc.data().date.toDate().toISOString() });
-            });
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error);
-        });
-
-        localStorage.removeItem('adlil_read');
-        console.log(`✅ ${snapshot.size} publication(s) synchronisée(s)`);
-    } catch (err) {
-        console.warn('⚠️ Sync error:', err);
-        throw err;
-    }
-}
-
 // Écran installation mobile (l'app est affichée dans window.onload après init IDB)
 if (isMobile && !isStandalone) {
     installScreen.style.display = 'block';
@@ -106,7 +91,7 @@ function showMainApp() {
     document.getElementById('success-screen').style.display = 'none';
     document.getElementById('mainApp').style.display = 'block';
     document.getElementById('burgerBtn').style.display = 'flex';
-    iosArrow.style.display = 'none'; 
+    iosArrow.style.display = 'none';
 }
 
 // --- INSTALLATION ---
@@ -134,12 +119,55 @@ function showView(viewId) {
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     document.getElementById('view-' + viewId).classList.add('active');
     document.getElementById('sideMenu').classList.remove('active');
+
     if (viewId === 'qr') {
-        generateQR();       // génère le canvas
-        renderFamilleQR();  // construit la liste (une seule fois, sans toucher le canvas)
+        generateQR();
+        renderFamilleQR();
     }
     if (viewId === 'welcome') refreshFeed();
+
+    if (viewId === 'localisation') {
+        if (!carte) {
+            initCarte();
+        } else {
+            carte.invalidateSize();
+        }
+    }
+    
+    if (viewId === 'app' && typeof insAppliquerTelephone === 'function') insAppliquerTelephone();
 }
+
+let timerSuivi = null;
+
+async function api(chemin, corps) {
+  const r = await fetch(SERVER + chemin, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: localStorage.getItem('monId'), ...corps })
+  });
+  return r.json();
+}
+
+// Ligne de liste : texte + boutons (le texte est inséré en textContent : sécurisé)
+function ligne(texte, boutons) {
+  const div = document.createElement('div');
+  div.style.cssText = 'display:flex;justify-content:space-between;align-items:center;' +
+                      'gap:6px;padding:6px 0;border-bottom:1px solid #eee;';
+  const span = document.createElement('span');
+  span.textContent = texte;
+  const zone = document.createElement('span');
+  boutons.forEach(([label, fn]) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.onclick = fn;
+    b.style.marginInlineStart = '4px';
+    zone.append(b);
+  });
+  div.append(span, zone);
+  return div;
+}
+
 
 // Convertit YYYY-MM-DD → JJ/MM/AA
 function toDisplayDate(iso) {
@@ -172,10 +200,10 @@ function md5(input) {
     function safeAdd(x, y) { const lsw = (x & 0xffff) + (y & 0xffff); return ((x >> 16) + (y >> 16) + (lsw >> 16)) << 16 | lsw & 0xffff; }
     function bitRotateLeft(num, cnt) { return num << cnt | num >>> (32 - cnt); }
     function md5cmn(q, a, b, x, s, t) { return safeAdd(bitRotateLeft(safeAdd(safeAdd(a, q), safeAdd(x, t)), s), b); }
-    function md5ff(a,b,c,d,x,s,t){return md5cmn(b&c|~b&d,a,b,x,s,t);}
-    function md5gg(a,b,c,d,x,s,t){return md5cmn(b&d|c&~d,a,b,x,s,t);}
-    function md5hh(a,b,c,d,x,s,t){return md5cmn(b^c^d,a,b,x,s,t);}
-    function md5ii(a,b,c,d,x,s,t){return md5cmn(c^(b|~d),a,b,x,s,t);}
+    function md5ff(a, b, c, d, x, s, t) { return md5cmn(b & c | ~b & d, a, b, x, s, t); }
+    function md5gg(a, b, c, d, x, s, t) { return md5cmn(b & d | c & ~d, a, b, x, s, t); }
+    function md5hh(a, b, c, d, x, s, t) { return md5cmn(b ^ c ^ d, a, b, x, s, t); }
+    function md5ii(a, b, c, d, x, s, t) { return md5cmn(c ^ (b | ~d), a, b, x, s, t); }
     function utf8Encode(str) {
         return unescape(encodeURIComponent(str));
     }
@@ -195,28 +223,28 @@ function md5(input) {
     function coreMD5(x, len) {
         x[len >> 5] |= 0x80 << len % 32;
         x[(len + 64 >>> 9 << 4) + 14] = len;
-        let a=1732584193,b=-271733879,c=-1732584194,d=271733878;
+        let a = 1732584193, b = -271733879, c = -1732584194, d = 271733878;
         for (let i = 0; i < x.length; i += 16) {
-            const [oa,ob,oc,od]=[a,b,c,d];
-            a=md5ff(a,b,c,d,x[i+0],7,-680876936);d=md5ff(d,a,b,c,x[i+1],12,-389564586);c=md5ff(c,d,a,b,x[i+2],17,606105819);b=md5ff(b,c,d,a,x[i+3],22,-1044525330);
-            a=md5ff(a,b,c,d,x[i+4],7,-176418897);d=md5ff(d,a,b,c,x[i+5],12,1200080426);c=md5ff(c,d,a,b,x[i+6],17,-1473231341);b=md5ff(b,c,d,a,x[i+7],22,-45705983);
-            a=md5ff(a,b,c,d,x[i+8],7,1770035416);d=md5ff(d,a,b,c,x[i+9],12,-1958414417);c=md5ff(c,d,a,b,x[i+10],17,-42063);b=md5ff(b,c,d,a,x[i+11],22,-1990404162);
-            a=md5ff(a,b,c,d,x[i+12],7,1804603682);d=md5ff(d,a,b,c,x[i+13],12,-40341101);c=md5ff(c,d,a,b,x[i+14],17,-1502002290);b=md5ff(b,c,d,a,x[i+15],22,1236535329);
-            a=md5gg(a,b,c,d,x[i+1],5,-165796510);d=md5gg(d,a,b,c,x[i+6],9,-1069501632);c=md5gg(c,d,a,b,x[i+11],14,643717713);b=md5gg(b,c,d,a,x[i+0],20,-373897302);
-            a=md5gg(a,b,c,d,x[i+5],5,-701558691);d=md5gg(d,a,b,c,x[i+10],9,38016083);c=md5gg(c,d,a,b,x[i+15],14,-660478335);b=md5gg(b,c,d,a,x[i+4],20,-405537848);
-            a=md5gg(a,b,c,d,x[i+9],5,568446438);d=md5gg(d,a,b,c,x[i+14],9,-1019803690);c=md5gg(c,d,a,b,x[i+3],14,-187363961);b=md5gg(b,c,d,a,x[i+8],20,1163531501);
-            a=md5gg(a,b,c,d,x[i+13],5,-1444681467);d=md5gg(d,a,b,c,x[i+2],9,-51403784);c=md5gg(c,d,a,b,x[i+7],14,1735328473);b=md5gg(b,c,d,a,x[i+12],20,-1926607734);
-            a=md5hh(a,b,c,d,x[i+5],4,-378558);d=md5hh(d,a,b,c,x[i+8],11,-2022574463);c=md5hh(c,d,a,b,x[i+11],16,1839030562);b=md5hh(b,c,d,a,x[i+14],23,-35309556);
-            a=md5hh(a,b,c,d,x[i+1],4,-1530992060);d=md5hh(d,a,b,c,x[i+4],11,1272893353);c=md5hh(c,d,a,b,x[i+7],16,-155497632);b=md5hh(b,c,d,a,x[i+10],23,-1094730640);
-            a=md5hh(a,b,c,d,x[i+13],4,681279174);d=md5hh(d,a,b,c,x[i+0],11,-358537222);c=md5hh(c,d,a,b,x[i+3],16,-722521979);b=md5hh(b,c,d,a,x[i+6],23,76029189);
-            a=md5hh(a,b,c,d,x[i+9],4,-640364487);d=md5hh(d,a,b,c,x[i+12],11,-421815835);c=md5hh(c,d,a,b,x[i+15],16,530742520);b=md5hh(b,c,d,a,x[i+2],23,-995338651);
-            a=md5ii(a,b,c,d,x[i+0],6,-198630844);d=md5ii(d,a,b,c,x[i+7],10,1126891415);c=md5ii(c,d,a,b,x[i+14],15,-1416354905);b=md5ii(b,c,d,a,x[i+5],21,-57434055);
-            a=md5ii(a,b,c,d,x[i+12],6,1700485571);d=md5ii(d,a,b,c,x[i+3],10,-1894986606);c=md5ii(c,d,a,b,x[i+10],15,-1051523);b=md5ii(b,c,d,a,x[i+1],21,-2054922799);
-            a=md5ii(a,b,c,d,x[i+8],6,1873313359);d=md5ii(d,a,b,c,x[i+15],10,-30611744);c=md5ii(c,d,a,b,x[i+6],15,-1560198380);b=md5ii(b,c,d,a,x[i+13],21,1309151649);
-            a=md5ii(a,b,c,d,x[i+4],6,-145523070);d=md5ii(d,a,b,c,x[i+11],10,-1120210379);c=md5ii(c,d,a,b,x[i+2],15,718787259);b=md5ii(b,c,d,a,x[i+9],21,-343485551);
-            a=safeAdd(a,oa);b=safeAdd(b,ob);c=safeAdd(c,oc);d=safeAdd(d,od);
+            const [oa, ob, oc, od] = [a, b, c, d];
+            a = md5ff(a, b, c, d, x[i + 0], 7, -680876936); d = md5ff(d, a, b, c, x[i + 1], 12, -389564586); c = md5ff(c, d, a, b, x[i + 2], 17, 606105819); b = md5ff(b, c, d, a, x[i + 3], 22, -1044525330);
+            a = md5ff(a, b, c, d, x[i + 4], 7, -176418897); d = md5ff(d, a, b, c, x[i + 5], 12, 1200080426); c = md5ff(c, d, a, b, x[i + 6], 17, -1473231341); b = md5ff(b, c, d, a, x[i + 7], 22, -45705983);
+            a = md5ff(a, b, c, d, x[i + 8], 7, 1770035416); d = md5ff(d, a, b, c, x[i + 9], 12, -1958414417); c = md5ff(c, d, a, b, x[i + 10], 17, -42063); b = md5ff(b, c, d, a, x[i + 11], 22, -1990404162);
+            a = md5ff(a, b, c, d, x[i + 12], 7, 1804603682); d = md5ff(d, a, b, c, x[i + 13], 12, -40341101); c = md5ff(c, d, a, b, x[i + 14], 17, -1502002290); b = md5ff(b, c, d, a, x[i + 15], 22, 1236535329);
+            a = md5gg(a, b, c, d, x[i + 1], 5, -165796510); d = md5gg(d, a, b, c, x[i + 6], 9, -1069501632); c = md5gg(c, d, a, b, x[i + 11], 14, 643717713); b = md5gg(b, c, d, a, x[i + 0], 20, -373897302);
+            a = md5gg(a, b, c, d, x[i + 5], 5, -701558691); d = md5gg(d, a, b, c, x[i + 10], 9, 38016083); c = md5gg(c, d, a, b, x[i + 15], 14, -660478335); b = md5gg(b, c, d, a, x[i + 4], 20, -405537848);
+            a = md5gg(a, b, c, d, x[i + 9], 5, 568446438); d = md5gg(d, a, b, c, x[i + 14], 9, -1019803690); c = md5gg(c, d, a, b, x[i + 3], 14, -187363961); b = md5gg(b, c, d, a, x[i + 8], 20, 1163531501);
+            a = md5gg(a, b, c, d, x[i + 13], 5, -1444681467); d = md5gg(d, a, b, c, x[i + 2], 9, -51403784); c = md5gg(c, d, a, b, x[i + 7], 14, 1735328473); b = md5gg(b, c, d, a, x[i + 12], 20, -1926607734);
+            a = md5hh(a, b, c, d, x[i + 5], 4, -378558); d = md5hh(d, a, b, c, x[i + 8], 11, -2022574463); c = md5hh(c, d, a, b, x[i + 11], 16, 1839030562); b = md5hh(b, c, d, a, x[i + 14], 23, -35309556);
+            a = md5hh(a, b, c, d, x[i + 1], 4, -1530992060); d = md5hh(d, a, b, c, x[i + 4], 11, 1272893353); c = md5hh(c, d, a, b, x[i + 7], 16, -155497632); b = md5hh(b, c, d, a, x[i + 10], 23, -1094730640);
+            a = md5hh(a, b, c, d, x[i + 13], 4, 681279174); d = md5hh(d, a, b, c, x[i + 0], 11, -358537222); c = md5hh(c, d, a, b, x[i + 3], 16, -722521979); b = md5hh(b, c, d, a, x[i + 6], 23, 76029189);
+            a = md5hh(a, b, c, d, x[i + 9], 4, -640364487); d = md5hh(d, a, b, c, x[i + 12], 11, -421815835); c = md5hh(c, d, a, b, x[i + 15], 16, 530742520); b = md5hh(b, c, d, a, x[i + 2], 23, -995338651);
+            a = md5ii(a, b, c, d, x[i + 0], 6, -198630844); d = md5ii(d, a, b, c, x[i + 7], 10, 1126891415); c = md5ii(c, d, a, b, x[i + 14], 15, -1416354905); b = md5ii(b, c, d, a, x[i + 5], 21, -57434055);
+            a = md5ii(a, b, c, d, x[i + 12], 6, 1700485571); d = md5ii(d, a, b, c, x[i + 3], 10, -1894986606); c = md5ii(c, d, a, b, x[i + 10], 15, -1051523); b = md5ii(b, c, d, a, x[i + 1], 21, -2054922799);
+            a = md5ii(a, b, c, d, x[i + 8], 6, 1873313359); d = md5ii(d, a, b, c, x[i + 15], 10, -30611744); c = md5ii(c, d, a, b, x[i + 6], 15, -1560198380); b = md5ii(b, c, d, a, x[i + 13], 21, 1309151649);
+            a = md5ii(a, b, c, d, x[i + 4], 6, -145523070); d = md5ii(d, a, b, c, x[i + 11], 10, -1120210379); c = md5ii(c, d, a, b, x[i + 2], 15, 718787259); b = md5ii(b, c, d, a, x[i + 9], 21, -343485551);
+            a = safeAdd(a, oa); b = safeAdd(b, ob); c = safeAdd(c, oc); d = safeAdd(d, od);
         }
-        return [a,b,c,d];
+        return [a, b, c, d];
     }
     const str = utf8Encode(input);
     const result = coreMD5(str2binl(str), str.length * 8);
@@ -233,8 +261,8 @@ function buildQRData(accompList) {
 
     // ── Partie claire ──────────────────────────────────────
     const telephone = d.telephone || '';
-    const nom       = d.nom       || '';
-    const prenom    = d.prenom    || '';
+    const nom = d.nom || '';
+    const prenom = d.prenom || '';
     const partieClaire = [nom, prenom, telephone].join('#');
 
     // ── Accompagnants : index séparés par virgule (remplace '/') ──
@@ -247,7 +275,7 @@ function buildQRData(accompList) {
     let familleStr = '';
     famData.forEach(conjoint => {
         familleStr += '#*';
-        familleStr += '#' + (conjoint.nom    || '');
+        familleStr += '#' + (conjoint.nom || '');
         familleStr += '#' + (conjoint.prenom || '');
         familleStr += '#' + toDisplayDate(conjoint.dateNaissance || '');
         const enfantsTries = [...(conjoint.enfants || [])].sort((a, b) => {
@@ -265,18 +293,18 @@ function buildQRData(accompList) {
     // '/' remplacé par les index des accompagnants cochés
     const partieScrambledRaw = [
         'PWA',
-        d.pere              || '',
-        d.grandpere         || '',
-        d.mereNom           || '',
-        d.merePrenom        || '',
+        d.pere || '',
+        d.grandpere || '',
+        d.mereNom || '',
+        d.merePrenom || '',
         toDisplayDate(d.datenaissance) || '',
-        d.groupesanguin     || '',
+        d.groupesanguin || '',
         d.niveauInstruction || '',
-        d.profession        || '',
-        d.adresseResidence  || '',
-        d.adresseActivite   || '',
-        d.maitrise          || '',
-        d.offres            || '',
+        d.profession || '',
+        d.adresseResidence || '',
+        d.adresseActivite || '',
+        d.maitrise || '',
+        d.offres || '',
         '-',
         accompStr           // ← à la place de '/'
     ].join('#') + familleStr;
@@ -294,12 +322,12 @@ function generateQR(accompList) {
     if (!container) return;
 
     const d = JSON.parse(localStorage.getItem('pwa_profile') || '{}');
-    const nom       = d.nom       || '';
-    const prenom    = d.prenom    || '';
+    const nom = d.nom || '';
+    const prenom = d.prenom || '';
     const telephone = d.telephone || '';
 
     if (!nom && !prenom) {
-        container.innerHTML = `<p style="color:#999; text-align:center;">لا توجد بيانات. يرجى ملء معلوماتك أولاً.</p>`;
+        container.innerHTML = `<p style="color:#999; text-align:center;">لا توجد بيانات. يرجى ملء معلوماتك أولاً</p>`;
         return;
     }
 
@@ -333,7 +361,7 @@ function generateQR(accompList) {
                     }
                 }
             }, 200);
-        } catch(err) {
+        } catch (err) {
             console.warn('QRCode lib error:', err);
             canvas.innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(data)}"
                 width="220" height="220" alt="QR Code"
@@ -370,7 +398,7 @@ function renderFamilleQR() {
     list.innerHTML = membres.map((nom, i) => `
         <label style="display:flex; align-items:center; gap:10px; padding:8px 4px;
                        border-bottom:1px solid #eee; cursor:pointer; font-size:0.97rem;">
-            <input type="checkbox" data-index="${i+1}"
+            <input type="checkbox" data-index="${i + 1}"
                 onchange="onFamilleQRChange()"
                 style="width:18px; height:18px; accent-color:#007bff; flex-shrink:0;">
             <span>${nom}</span>
@@ -469,7 +497,7 @@ let famille = []; // tableau de conjoints: { id, nom, prenom, dateNaissance, enf
 let conjointCounter = 0;
 let enfantCounter = 0;
 
-const conjointLabels = ['الزوجة الأولى','الزوجة الثانية','الزوجة الثالثة','الزوجة الرابعة'];
+const conjointLabels = ['الزوجة الأولى', 'الزوجة الثانية', 'الزوجة الثالثة', 'الزوجة الرابعة'];
 
 function renderFamille() {
     const zone = document.getElementById('famille-zone');
@@ -582,24 +610,24 @@ function updateEnfant(conjointId, enfantId, field, val) {
 document.getElementById('userForm').onsubmit = (e) => {
     e.preventDefault();
     const data = {
-        nom:               document.getElementById('f_nom').value,
-        prenom:            document.getElementById('f_prenom').value,
-        pere:              document.getElementById('f_pere').value,
-        grandpere:         document.getElementById('f_grandpere').value,
-        mereNom:           document.getElementById('f_mereNom').value,
-        merePrenom:        document.getElementById('f_merePrenom').value,
-        datenaissance:     document.getElementById('f_datenaissance').value,
-        groupesanguin:     document.getElementById('f_groupesanguin').value,
-        telephone:         document.getElementById('f_telephone').value,
-        familleAlger:      document.getElementById('f_familleAlger').value,
+        nom: document.getElementById('f_nom').value,
+        prenom: document.getElementById('f_prenom').value,
+        pere: document.getElementById('f_pere').value,
+        grandpere: document.getElementById('f_grandpere').value,
+        mereNom: document.getElementById('f_mereNom').value,
+        merePrenom: document.getElementById('f_merePrenom').value,
+        datenaissance: document.getElementById('f_datenaissance').value,
+        groupesanguin: document.getElementById('f_groupesanguin').value,
+        telephone: document.getElementById('f_telephone').value,
+        familleAlger: document.getElementById('f_familleAlger').value,
         niveauInstruction: document.getElementById('f_niveauInstruction').value,
-        profession:        document.getElementById('f_profession').value,
-        adresseResidence:  document.getElementById('f_adresseResidence').value,
-        adresseActivite:   document.getElementById('f_adresseActivite').value,
-        mokataa:           document.getElementById('f_mokataa').value,
-        maitrise:          document.getElementById('f_maitrise').value,
-        offres:            document.getElementById('f_offres').value,
-        famille:           famille
+        profession: document.getElementById('f_profession').value,
+        adresseResidence: document.getElementById('f_adresseResidence').value,
+        adresseActivite: document.getElementById('f_adresseActivite').value,
+        mokataa: document.getElementById('f_mokataa').value,
+        maitrise: document.getElementById('f_maitrise').value,
+        offres: document.getElementById('f_offres').value,
+        famille: famille
     };
     // Copie profonde de famille pour le tri — ne pas muter le tableau en mémoire
     const familleSauvegarde = JSON.parse(JSON.stringify(famille));
@@ -640,10 +668,10 @@ window.onload = async () => {
     const raw = localStorage.getItem('pwa_profile');
     if (!raw) return;
     const d = JSON.parse(raw);
-    const fields = ['nom','prenom','pere','grandpere','mereNom','merePrenom',
-                    'datenaissance','groupesanguin','telephone','familleAlger',
-                    'niveauInstruction','profession','adresseResidence',
-                    'adresseActivite','mokataa','maitrise','offres'];
+    const fields = ['nom', 'prenom', 'pere', 'grandpere', 'mereNom', 'merePrenom',
+        'datenaissance', 'groupesanguin', 'telephone', 'familleAlger',
+        'niveauInstruction', 'profession', 'adresseResidence',
+        'adresseActivite', 'mokataa', 'maitrise', 'offres'];
     fields.forEach(f => {
         const el = document.getElementById('f_' + f);
         if (el && d[f]) el.value = d[f];
@@ -668,56 +696,20 @@ window.onload = async () => {
 // DISPLAY FEED
 // ============================================================
 
-async function loadFeed() {
-    const container = document.getElementById('feed-container');
-    if (!container) return;
-    const tx = idb.transaction(STORE_NAME, 'readonly');
-    const store = tx.objectStore(STORE_NAME);
-    const index = store.index('date');
-    const publications = await new Promise(res => {
-        const req = index.getAll();
-        req.onsuccess = () => res(req.result);
-    });
-    if (publications.length === 0) {
-        container.innerHTML = `<p style="color:#999; text-align:center;">Aucune publication.</p>`;
-        return;
-    }
-    const readIds = JSON.parse(localStorage.getItem('adlil_read') || '[]');
-    let firstUnreadIndex = -1;
-    let html = '';
-    publications.forEach((pub, i) => {
-        const isRead = readIds.includes(pub.id);
-        if (!isRead && firstUnreadIndex === -1) firstUnreadIndex = i;
-        const dateStr = new Date(pub.date).toLocaleDateString('fr-FR', { day:'2-digit', month:'short', year:'numeric' });
-        html += `
-            <div class="pub-bubble ${isRead ? 'pub-read' : 'pub-unread'}" id="pub-${pub.id}" onclick="markRead('${pub.id}')">
-                <div class="pub-type">${pub.type}</div>
-                <div class="pub-contenu">${pub.contenu}</div>
-                <div class="pub-meta">${pub.auteur} · ${dateStr}</div>
-            </div>`;
-    });
-    container.innerHTML = html;
-    const allIds = publications.map(p => p.id);
-    localStorage.setItem('adlil_read', JSON.stringify(allIds));
-    if (firstUnreadIndex !== -1) {
-        const el = document.getElementById('pub-' + publications[firstUnreadIndex].id);
-        if (el) setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
-    }
-}
-
 async function refreshFeed() {
     const container = document.getElementById('feed-container');
     if (!container) return;
-    await loadFeed();
     if (!navigator.onLine) return;
+    if (document.getElementById('sync-indicator')) return;   // évite les doubles clics
+
     const indicator = document.createElement('div');
     indicator.id = 'sync-indicator';
     indicator.style.cssText = 'text-align:center;font-size:12px;color:#aaa;padding:4px;';
     indicator.textContent = '🔄 Mise à jour...';
     container.prepend(indicator);
+
     try {
-        await syncPublications();
-        await loadFeed();
+        await loadDevFeed();
     } catch (err) {
         console.warn('Sync failed:', err);
     } finally {
@@ -741,10 +733,33 @@ messaging.onMessage((payload) => {
         payload.notification?.title || "ADLIL",
         {
             body: payload.notification?.body || "",
-            icon: "./icon-192.png"
+            icon: "/Adlil-test/icon-192.png"
         }
     );
 });
+
+async function fcmEnregistrer() {
+    const token = localStorage.getItem('fcm_token');
+    if (!token) return;
+
+    // le compte se crée en silence au lancement : on lui laisse un peu de temps
+    for (let i = 0; i < 5 && !localStorage.getItem('monId'); i++) {
+        if (typeof insCreerCompte === 'function') await insCreerCompte();
+        if (!localStorage.getItem('monId')) await new Promise(r => setTimeout(r, 1500));
+    }
+    const id = localStorage.getItem('monId');
+    if (!id) return;
+
+    try {
+        const r = await fetch(SERVER + '/dev/enregistrer-appareil', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, clientId: CLIENT_ID, token })
+        });
+        const d = await r.json();
+        console.log('✅ Appareil enregistré :', d.success);
+    } catch (e) { console.error('❌ Enregistrement appareil :', e); }
+}
 
 async function testFCM() {
     try {
@@ -763,43 +778,8 @@ async function testFCM() {
             serviceWorkerRegistration: registration
         });
 
-        console.log('✅ TOKEN FCM :', token);
-
-        console.log("AVANT FETCH");
-
-        const response = await fetch(
-        //'https://bind-regular-football-local.trycloudflare.com/register',
-        //'https://matters-clock-ozone-brunette.trycloudflare.com/register',
-        'https://api.adlil.net/register',
-        {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                clientId: CLIENT_ID,
-                token: token
-             })
-        }
-        );
-
-        console.log("APRES FETCH", response.status);
-
-    /*
-        const response = await fetch(
-            'https://westminster-boats-realistic-simulations.trycloudflare.com/register',
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    clientId: CLIENT_ID,
-                    token: token
-                })
-            }
-        );
-    */
-        const result = await response.json();
-        console.log('✅ Enregistrement serveur :', result);
+        localStorage.setItem('fcm_token', token);
+        await fcmEnregistrer();
 
     } catch (err) {
         console.error('❌ Erreur FCM :', err);
@@ -813,44 +793,633 @@ testFCM();
 // TEST IMAGES DEV
 // ============================================================
 
-const DEV_SERVER = 'https://dev-api.adlil.net';
-
-async function loadDevImages() {
-    try {
-        const response = await fetch(`${DEV_SERVER}/dev/images`);
-        const data = await response.json();
-
-        console.log('🖼️ Images DEV :', data);
-
-        if (data.success) {
-            data.images.forEach(image => {
-                console.log(
-                    'Image :',
-                    `${DEV_SERVER}/dev/images/${image.filename}`
-                );
-            });
-        }
-    } catch (err) {
-        console.error('❌ Serveur DEV inaccessible :', err);
-    }
-}
-
-loadDevImages();
-
 // ============================================================
 // TEST FEED PUBLICATIONS DEV
 // ============================================================
 
-async function loadDevPublications() {
-    try {
-        const response = await fetch('http://localhost:3001/dev/images');
-        const data = await response.json();
+const DEV_DB_NAME = "adlil-dev-db";
+const DEV_STORE = "publications";
 
-        console.log('📚 Publications DEV :', data);
+function openDevDB() {
+    return new Promise((resolve, reject) => {
 
-    } catch (err) {
-        console.error('❌ Serveur DEV inaccessible :', err);
+        const request = indexedDB.open(DEV_DB_NAME, 1);
+
+        request.onupgradeneeded = function (event) {
+            const db = event.target.result;
+
+            if (!db.objectStoreNames.contains(DEV_STORE)) {
+                db.createObjectStore(DEV_STORE, {
+                    keyPath: "id"
+                });
+            }
+        };
+
+        request.onsuccess = function () {
+            resolve(request.result);
+        };
+
+        request.onerror = function () {
+            reject(request.error);
+        };
+    });
+}
+
+async function saveDevPublications(publications) {
+
+    const db = await openDevDB();
+
+    for (const pub of publications) {
+
+        let blob = null;
+
+        // Télécharger le fichier avant d'ouvrir la transaction
+        if (pub.type === "image" || pub.type === "pdf") {
+
+            const response = await fetch(
+                `${SERVER}/dev/files/${pub.filename}`
+            );
+
+            if (!response.ok) {
+                throw new Error(
+                    `Erreur téléchargement : ${pub.filename}`
+                );
+            }
+
+            blob = await response.blob();
+        }
+
+        // Ouvrir une nouvelle transaction uniquement pour l'écriture
+        await new Promise((resolve, reject) => {
+
+            const transaction = db.transaction(
+                DEV_STORE,
+                "readwrite"
+            );
+
+            const store = transaction.objectStore(DEV_STORE);
+
+            if (blob) {
+                pub.blob = blob;
+            }
+
+            const request = store.put(pub);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
     }
 }
 
-loadDevPublications();
+async function saveDevMetadata(publications) {
+
+    const db = await openDevDB();
+
+    return new Promise((resolve, reject) => {
+
+        const transaction = db.transaction(
+            DEV_STORE,
+            "readwrite"
+        );
+
+        const store = transaction.objectStore(DEV_STORE);
+
+        publications.forEach(pub => {
+
+            // On conserve les métadonnées,
+            // mais pas le Blob du fichier
+            store.put(pub);
+
+        });
+
+        transaction.oncomplete = () => {
+            resolve();
+        };
+
+        transaction.onerror = () => {
+            reject(transaction.error);
+        };
+    });
+}
+
+async function getDevPublications() {
+
+    const db = await openDevDB();
+
+    return new Promise((resolve, reject) => {
+
+        const transaction = db.transaction(
+            DEV_STORE,
+            "readonly"
+        );
+
+        const store = transaction.objectStore(DEV_STORE);
+
+        const request = store.getAll();
+
+        request.onsuccess = () => {
+            resolve(request.result);
+        };
+
+        request.onerror = () => {
+            reject(request.error);
+        };
+    });
+}
+
+async function downloadImageInBackground(pub) {
+
+    try {
+
+        const response = await fetch(
+            `${SERVER}/dev/files/${pub.filename}`
+        );
+
+        if (!response.ok) {
+            throw new Error("Téléchargement impossible");
+        }
+
+        const blob = await response.blob();
+
+        const db = await openDevDB();
+
+        await new Promise((resolve, reject) => {
+
+            const transaction = db.transaction(
+                DEV_STORE,
+                "readwrite"
+            );
+
+            const store = transaction.objectStore(DEV_STORE);
+
+            pub.blob = blob;
+            pub.downloaded = true;
+
+            const request = store.put(pub);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+
+        console.log(
+            "✅ Image téléchargée :",
+            pub.filename
+        );
+
+    } catch (err) {
+
+        console.log(
+            "⏳ Image non téléchargée :",
+            pub.filename
+        );
+    }
+}
+
+async function openDevFile(pub) {
+
+    try {
+
+        // Déjà téléchargé
+        if (pub.blob) {
+
+            const url = URL.createObjectURL(pub.blob);
+
+            window.open(url, "_blank");
+
+            return;
+        }
+
+        // Pas encore téléchargé
+        console.log(
+            "⏳ Téléchargement avant ouverture :",
+            pub.filename
+        );
+
+        const response = await fetch(
+            `${SERVER}/dev/files/${pub.filename}`
+        );
+
+        if (!response.ok) {
+            throw new Error("Téléchargement impossible");
+        }
+
+        const blob = await response.blob();
+
+        // Sauvegarder le fichier
+        const db = await openDevDB();
+
+        await new Promise((resolve, reject) => {
+
+            const transaction =
+                db.transaction(DEV_STORE, "readwrite");
+
+            const store =
+                transaction.objectStore(DEV_STORE);
+
+            pub.blob = blob;
+            pub.downloaded = true;
+
+            const request = store.put(pub);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+
+        // Ouvrir
+        const url = URL.createObjectURL(blob);
+
+        window.open(url, "_blank");
+
+    } catch (err) {
+
+        console.error(
+            "❌ Ouverture fichier :",
+            err
+        );
+    }
+}
+
+async function openDevFileById(id) {
+
+    try {
+
+        const publications = await getDevPublications();
+
+        const pub = publications.find(
+            p => p.id === Number(id)
+        );
+
+        if (!pub) {
+            console.error("Publication introuvable :", id);
+            return;
+        }
+
+        await openDevFile(pub);
+
+    } catch (err) {
+
+        console.error(
+            "❌ Ouverture fichier :",
+            err
+        );
+    }
+}
+
+function formatPubDate(dateString) {
+    const date = new Date(dateString);
+    const now = new Date();
+
+    const today = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate()
+    );
+
+    const pubDay = new Date(
+        date.getFullYear(),
+        date.getMonth(),
+        date.getDate()
+    );
+
+    const diffDays =
+        Math.floor((today - pubDay) / 86400000);
+
+    if (diffDays === 0) return "Aujourd’hui";
+    if (diffDays === 1) return "Hier";
+
+    if (diffDays < 7) {
+        return date.toLocaleDateString("fr-FR", {
+            weekday: "long"
+        });
+    }
+
+    return date.toLocaleDateString("fr-FR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric"
+    });
+}
+
+function formatPubTime(dateString) {
+    return new Date(dateString).toLocaleTimeString("fr-FR", {
+        hour: "2-digit",
+        minute: "2-digit"
+    });
+}
+
+function majBienvenue() {
+  const feed = document.getElementById('feed-container');
+  const bienvenue = document.getElementById('welcomeUser');
+  if (!feed || !bienvenue) return;
+  bienvenue.style.display = feed.querySelector('.pub-bubble') ? 'none' : 'block';
+}
+
+const feedEl = document.getElementById('feed-container');
+if (feedEl) {
+  // se déclenche à chaque changement du contenu, quelle que soit la fonction qui le modifie
+  new MutationObserver(majBienvenue).observe(feedEl, { childList: true, subtree: true });
+  majBienvenue();
+}
+
+async function loadDevFeed() {
+
+    const container = document.getElementById('feed-container');
+
+    if (!container) return;
+
+    try {
+
+        // 1. Récupérer uniquement les nouvelles publications
+        const response = await fetch(
+            `${SERVER}/dev/publications?clientId=${CLIENT_ID}`
+        );
+
+        const data = await response.json();
+
+        if (!data.success) return;
+
+        console.log(
+            "📦 PUBLICATIONS REÇUES :",
+            data.publications
+        );
+
+        // 2. Sauvegarder immédiatement les métadonnées
+        //    (sans télécharger les fichiers originaux)
+        if (data.publications.length > 0) {
+
+            await saveDevMetadata(data.publications);
+
+            const lastId =
+                data.publications[
+                    data.publications.length - 1
+                ].id;
+
+            await fetch(
+                `${SERVER}/dev/sync-confirm`,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        clientId: CLIENT_ID,
+                        lastId: lastId
+                    })
+                }
+            );
+        }
+
+        // 3. Afficher immédiatement le feed local
+        const publications = await getDevPublications();
+        const lastSeenId = localStorage.getItem("adlil_last_seen_id");
+
+        let html = '';
+        let lastDay = '';
+
+        let newMessagesInserted = false;
+
+        publications.forEach(pub => {
+
+            if (
+                lastSeenId &&
+                !newMessagesInserted &&
+                pub.id > Number(lastSeenId)
+            ) {
+                html += `
+                    <div style="
+                        text-align:center;
+                        margin:12px 0;
+                        font-size:13px;
+                        color:#666;
+                    ">
+                        ─── Nouveaux messages ───
+                    </div>
+                `;
+
+                newMessagesInserted = true;
+            }
+
+            const day = formatPubDate(pub.created_at);
+
+            if (day !== lastDay) {
+                html += `
+                    <div style="
+                        text-align:center;
+                        margin:12px 0;
+                        font-size:13px;
+                        color:#666;
+                    ">
+                        ${day}
+                    </div>
+                `;
+
+                lastDay = day;
+            }
+
+            if (pub.type === 'image') {
+
+                const thumbnailUrl =
+                    `${SERVER}/dev/thumbnails/${pub.filename}`;
+
+                html += `
+                    <div>
+                        <img
+                            src="${thumbnailUrl}"
+                            data-pub-id="${pub.id}"
+                            class="dev-image-thumbnail"
+                            style="width:180px; height:auto; cursor:pointer; border-radius:8px; box-shadow:10px 10px 15px rgba(0,0,0,0.7);"
+                        >
+                    </div>
+                `;
+            }
+
+            if (pub.type === 'pdf') {
+
+                const thumbnailName =
+                    pub.filename.replace(/\.pdf$/i, '.jpg');
+
+                const thumbnailUrl =
+                    `${SERVER}/dev/thumbnails/${thumbnailName}`;
+
+                html += `
+                    <div
+                        data-pub-id="${pub.id}"
+                        class="dev-pdf-item"
+                        style="cursor:pointer;"
+                    >
+                        <img
+                            src="${thumbnailUrl}"
+                            style="width:180px; height:auto; border-radius:8px; box-shadow:0px 6px 18px rgba(0,0,0,0.25);"
+                        >
+                    </div>
+                `;
+            }
+
+            if (pub.type === 'text') {
+
+                html += `
+                    <div class="pub-bubble" dir="auto" style="
+                        cursor: default;
+                        text-align: start;
+                        white-space: normal;
+                        overflow-wrap: break-word;
+                        word-break: break-word;
+                        border-left: none;
+                        box-shadow: 5px 5px 8px rgba(0,0,0,0.1);
+                    ">
+                        ${pub.content.replace(/\n/g, "<br>")}
+                        <span style="
+                            float:right;
+                            font-size:11px;
+                            color:#777;
+                            margin-left:8px;
+                            margin-top:24px;
+                        ">
+                            ${formatPubTime(pub.created_at)}
+                        </span>
+                    </div>
+                `;
+            }
+        });
+
+        container.innerHTML = html;
+
+        const lastElement = container.lastElementChild;
+
+        if (lastElement) {
+
+            const observer = new IntersectionObserver((entries) => {
+
+                if (entries[0].isIntersecting) {
+
+                    console.log("✅ Dernier record affiché :");
+                    refresh();
+
+                    observer.disconnect();
+                }
+
+            });
+
+            observer.observe(lastElement);
+
+        }
+
+        container.querySelectorAll(".dev-image-thumbnail, .dev-pdf-item")
+            .forEach(element => {
+
+                element.addEventListener("click", async () => {
+
+                    await openDevFileById(element.dataset.pubId);
+
+                    localStorage.setItem(
+                        "adlil_last_seen_id",
+                        publications[publications.length - 1].id
+                    );
+
+                    loadDevFeed();
+                });
+
+            });
+
+        // 4. Maintenant seulement :
+        //    télécharger les originaux en arrière-plan
+        publications.forEach(pub => {
+
+            if (pub.type === "image" && !pub.downloaded) {
+                downloadImageInBackground(pub);
+            }
+
+        });
+
+    } catch (err) {
+
+        console.error('❌ Feed DEV :', err);
+
+        // Hors ligne
+        try {
+
+            const publications = await getDevPublications();
+
+            let html = '';
+
+            publications.forEach(pub => {
+
+                if (pub.type === 'image') {
+
+                    if (pub.blob) {
+
+                        const url =
+                            URL.createObjectURL(pub.blob);
+
+                        html += `
+                            <div>
+                                <img
+                                    src="${url}"
+                                    style="width:180px; height:120px; object-fit:cover; border-radius:8px;"
+                                >
+                            </div>
+                        `;
+                    }
+                }
+
+                if (pub.type === 'pdf') {
+
+                    html += `
+                        <div>
+                            <div style="font-size:40px;">📄</div>
+                            <div style="font-weight:bold;">PDF</div>
+                            <div>
+                                ${pub.filename.replace(/\.[^/.]+$/, '')}
+                            </div>
+                        </div>
+                    `;
+                }
+
+                if (pub.type === 'text') {
+
+                    html += `
+                        <div class="pub-bubble" dir="auto" style="
+                            cursor: default;
+                            text-align: start;
+                            white-space: normal;
+                            overflow-wrap: break-word;
+                            word-break: break-word;
+                        ">
+                            ${pub.content.replace(/\n/g, "<br>")}
+                        </div>
+                    `;
+                }
+
+            });
+
+            container.innerHTML = html;
+
+        } catch (offlineErr) {
+
+            console.error(
+                '❌ Lecture IndexedDB :',
+                offlineErr
+            );
+        }
+    }
+}
+
+async function refresh() {
+
+    const publications = await getDevPublications();
+
+    if (publications.length > 0) {
+        localStorage.setItem(
+            "adlil_last_seen_id",
+            publications[publications.length - 1].id
+        );
+    }
+
+    console.log("REFRESH");
+}
+
+loadDevFeed();
+
+setInterval(() => {
+    loadDevFeed();
+}, 10000);

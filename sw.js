@@ -12,7 +12,7 @@ firebase.initializeApp({
     appId: "1:178895455937:web:90d03218b3f78e0d67f640"
 });
 const messaging = firebase.messaging();
-const CACHE_VERSION = 29;
+const CACHE_VERSION = 33;
 const CACHE_NAME = `mon-app-v${CACHE_VERSION}`;
 
 // ─── FICHIERS À METTRE EN CACHE ─────────────────────────────────────────────
@@ -91,7 +91,7 @@ self.addEventListener('fetch', (e) => {
             .then(cached => cached || fetch(e.request))
     );
 });
-
+/*
 messaging.onBackgroundMessage((payload) => {
     console.log("Message reçu en arrière-plan :", payload);
 
@@ -103,3 +103,4 @@ messaging.onBackgroundMessage((payload) => {
         }
     );
 });
+*/
